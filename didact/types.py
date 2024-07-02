@@ -10,3 +10,4 @@ class Embeddable(BaseModel):
 
 class EmbeddedText(Embeddable):
     text: str
+    source: str | None = None
