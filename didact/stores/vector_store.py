@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any, Sequence
+import asyncio
 
 from pydantic import Field
 import numpy as np
@@ -23,7 +24,13 @@ class VectorStore(ABC):
         pass
 
     @abstractmethod
-    async def similarity_search(
+    def similarity_search(
+        self, client: Any, query: str, k: int
+    ) -> tuple[Sequence[Embeddable], list[float]]:
+        pass
+
+    @abstractmethod
+    async def asimilarity_search(
         self, client: Any, query: str, k: int
     ) -> tuple[Sequence[Embeddable], list[float]]:
         pass
@@ -33,6 +40,12 @@ class VectorStore(ABC):
         pass
 
     def max_marginal_relevance_search(
+        self, client: Any, query: str, k: int, fetch_k: int
+    ) -> tuple[Sequence[Embeddable], list[float]]:
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(self.amax_marginal_relevance_search(client, query, k, fetch_k))
+
+    async def amax_marginal_relevance_search(
         self, client: Any, query: str, k: int, fetch_k: int
     ) -> tuple[Sequence[Embeddable], list[float]]:
         """Vectorized implementation of Maximal Marginal Relevance (MMR) search.
@@ -47,7 +60,7 @@ class VectorStore(ABC):
         if fetch_k < k:
             raise ValueError("fetch_k must be greater or equal to k")
 
-        texts, scores = self.similarity_search(client, query, fetch_k)
+        texts, scores = await self.asimilarity_search(client, query, fetch_k)
         
         if len(texts) <= k or self.mmr_lambda >= 1.0:
             return texts, scores

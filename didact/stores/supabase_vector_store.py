@@ -1,15 +1,17 @@
+from itertools import zip_longest
 from pathlib import Path
 from typing import Sequence
+import asyncio
 import json
 
-from supabase import create_client, Client
+from supabase._async.client import create_client as create_async_client, AsyncClient
 import numpy as np
 
 from didact.bib import doi_to_apa
 from didact.llms.base import BaseLLM
 from didact.readers import parse_pdf
 from didact.types import Embeddable, EmbeddedText
-from didact.utils import download_arxiv_pdf
+from didact.utils import adownload_arxiv_pdf
 from .vector_store import VectorStore
 
 
@@ -18,13 +20,22 @@ class SupabaseVectorStore(VectorStore):
     _embeddings: np.ndarray | None = None
     
     def __init__(self, supabase_url: str, supabase_service_key: str):
-        self.supabase: Client = create_client(supabase_url, supabase_service_key)
+        self.supabase_url = supabase_url
+        self.supabase_service_key = supabase_service_key
+    
+    async def get_async_client(self) -> AsyncClient:
+        return await create_async_client(self.supabase_url, self.supabase_service_key)
 
     def clear(self) -> None:
         self.texts = []
         self._embeddings = None
 
     def add_arxiv_json(self, arxiv_json, llm: BaseLLM):
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(self.aadd_arxiv_json(arxiv_json, llm))
+
+    async def aadd_arxiv_json(self, arxiv_json, llm: BaseLLM, batchsize: int = 30):
+        supabase = await self.get_async_client()
         arxiv_id = arxiv_json.get("id")
         title = arxiv_json.get("title")
         abstract = arxiv_json.get("abstract")
@@ -36,16 +47,15 @@ class SupabaseVectorStore(VectorStore):
         version = versions[-1]
 
         # Check if doi already exists
-        doi_check_response = self.supabase.table("documents").select("*").or_(
+        doi_check_response = await supabase.table("documents").select("*").or_(
             f"doi.eq.{doi},arxiv_id.eq.{arxiv_id}"
         ).execute()
         if len(doi_check_response.data):
             raise ValueError(f"{doi or arxiv_id} already exists in database")
 
-        
-        filename = download_arxiv_pdf(arxiv_id, version)
+        filename = await adownload_arxiv_pdf(arxiv_id, version)
         contents = parse_pdf(filename)
-        # Path(filename).unlink()
+        Path(filename).unlink()
         chunks = []
         max_chunk_size = 3000
         overlap = 100
@@ -55,7 +65,7 @@ class SupabaseVectorStore(VectorStore):
         if len(contents): chunks.append(contents)
         
         # Insert document
-        response = self.supabase.table("documents").insert({
+        response = await supabase.table("documents").insert({
             "url": url,
             "title": title,
             "abstract": abstract,
@@ -67,14 +77,19 @@ class SupabaseVectorStore(VectorStore):
             raise ValueError("Document not inserted")
         doc_id = response.data[0].get("id")
         
-        # Insert chunks
-        for chunk in chunks:
-            embedding = llm.embed(chunk)
-            self.supabase.table("chunks").insert({
+        # Insert chunks in batches
+        chunk_groups = list(zip_longest(*(iter(chunks),) * batchsize))
+        for chunk_group in chunk_groups:
+            chunk_group = [c for c in chunk_group if c]
+            embeddings = await asyncio.gather(*[
+                llm.aembed(chunk) for chunk in chunk_group
+            ])
+            await supabase.table("chunks").insert([{
                 "value": chunk,
-                "vector": embedding.tolist(),
+                "vector": emb.tolist(),
                 "document": doc_id
-            }).execute()
+            } for emb, chunk in zip(embeddings, chunks)]).execute()
+        print(f"Embedded and inserted {title}")
 
     def add_texts_and_embeddings(
         self,
@@ -85,16 +100,22 @@ class SupabaseVectorStore(VectorStore):
             "vector": text.embedding,
         } for text in texts]).execute()
 
-    def similarity_search(
+    def similarity_search(self, client: BaseLLM, query: str, k: int) -> tuple[Sequence[Embeddable], list[float]]:
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(self.asimilarity_search(client, query, k))
+
+    async def asimilarity_search(
         self, client: BaseLLM, query: str, k: int
     ) -> tuple[Sequence[Embeddable], list[float]]:
         # k = min(k, len(self.texts))
         if k == 0:
             return [], []
 
-        np_query = client.embed(query)
+        supabase = await self.get_async_client()
 
-        response = self.supabase.rpc('match_documents', {
+        np_query = await client.aembed(query)
+
+        response = await supabase.rpc('match_documents', {
             "query_embedding": np_query.tolist(),
             "match_threshold": 0,
             "match_count": k,

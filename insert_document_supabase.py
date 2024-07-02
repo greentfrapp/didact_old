@@ -1,9 +1,11 @@
 from pathlib import Path
 from time import perf_counter
 from typing import Sequence
+import asyncio
 import json
 
 from supabase import create_client, Client
+from tqdm import tqdm
 import numpy as np
 
 from didact.config import settings
@@ -72,7 +74,7 @@ def insert_arxiv_doc(arxiv_json):
         # store.add_texts_and_embeddings([EmbeddedText(embedding=embedding, text=chunk)])
 
 
-if __name__ == "__main__":
+async def main():
     """
     Not inserted:
     - 0704.0213
@@ -88,16 +90,37 @@ if __name__ == "__main__":
             except json.JSONDecodeError:
                 continue
             data.append(entry_data)
-    data = data[20:]
+    data = data[179:]
+    # for i, row in tqdm(enumerate(data)):
+    #     doi = row.get("doi")
+    #     arxiv_id = row.get("id")
+    #     doi_check_response = supabase.table("documents").select("*").or_(
+    #         f"doi.eq.{doi},arxiv_id.eq.{arxiv_id}"
+    #     ).execute()
+    #     if not len(doi_check_response.data):
+    #         print(i)
+    #         print(row)
+    #         break
+    # quit()
     start = perf_counter()
     # insert_arxiv_doc(data[0])
     num_ingested = 0
-    for row in data:
-        try:
-            store.add_arxiv_json(row, llm)
-            num_ingested += 1
-        except Exception as e:
-            print(e)
-        if num_ingested >= 2:
+    i = 0
+    batchsize = 20
+    while True:
+        rows = data[i:i+batchsize]
+        tasks = [store.aadd_arxiv_json(row, llm) for row in rows]
+        for coroutine in asyncio.as_completed(tasks):
+            try:
+                await coroutine
+                num_ingested += 1
+            except Exception as e:
+                print('Exception: ', e)
+        i += batchsize
+        if num_ingested >= 100:
             break
     print((perf_counter() - start) / num_ingested)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

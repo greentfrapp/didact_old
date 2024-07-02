@@ -2,6 +2,7 @@ from pathlib import Path
 from pydantic import BaseModel
 from time import perf_counter
 from typing import List
+import asyncio
 import re
 
 from didact.llms.base import BaseLLM
@@ -40,12 +41,16 @@ class Docs:
             self.store.add_texts_and_embeddings([EmbeddedText(embedding=embedding, text=chunk)])
 
     def summarize_chunk(self, chunk: str, query: str, source: str = None):
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(self.asummarize_chunk(chunk, query, source))
+
+    async def asummarize_chunk(self, chunk: str, query: str, source: str = None):
         prompt = (
             "Summarize the text below to help answer a question. Do not directly answer the question, instead summarize to give evidence to help answer the question. At the end of your response, provide a score from 1-10 indicating relevance to question. Do not explain your score. Enclose the summary in <summary> tags and enclose the score in <score> tags. If the text is irrelevant, assign a score of 0 and reply <summary>Not applicable</summary><score>0</score>.\n"
             f"\n{chunk}\n\n"
             f"Question: {query}"
         )
-        response = self.llm.prompt(prompt)
+        response = await self.llm.aprompt(prompt)
 
         summary_rgx_result = re.search("<summary>(?P<summary>.*?)</summary>", response)
         score_rgx_result = re.search("<score>(?P<score>.*?)</score>", response)
@@ -64,18 +69,22 @@ class Docs:
         }
 
     def gather_evidence(self, query: str, k: int = 5, fetch_k: int = 10, summarize: bool = True, verbose: bool = False):
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(self.agather_evidence(query, k, fetch_k, summarize, verbose))
+
+    async def agather_evidence(self, query: str, k: int = 5, fetch_k: int = 10, summarize: bool = True, verbose: bool = False):
         """
         1. Embed query
         2. Find k candidate chunks
         3. Create prompt with candidate chunks and question
         """
         start = perf_counter()
-        candidates, scores = self.store.max_marginal_relevance_search(self.llm, query, k, fetch_k)
+        candidates, scores = await self.store.amax_marginal_relevance_search(self.llm, query, k, fetch_k)
         if verbose:
             print(f"Gather evidence: {perf_counter() - start}s")
         start = perf_counter()
         if summarize:
-            summary_score_list = [self.summarize_chunk(c.text, query, c.source) for c in candidates]
+            summary_score_list = await asyncio.gather(*[self.asummarize_chunk(c.text, query, c.source) for c in candidates])
         else:
             summary_score_list = [{"summary": c.text, "source": c.source, "score": 5} for c in candidates]
         if verbose and summarize:
@@ -83,17 +92,25 @@ class Docs:
         return [s["summary"] + "\n(" + s["source"] + ")" for s in summary_score_list if s.get("summary") and s.get("score")]
 
     def ask_llm(self, query: str, verbose: bool = False):
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(self.aask_llm(query, verbose))
+
+    async def aask_llm(self, query: str, verbose: bool = False):
         start = perf_counter()
         prompt = (
             "We are collecting background information for the question/task below. Provide a brief summary of information you know (about 50 words) that could help answer the question - do not answer it directly and ignore formatting instructions. It is ok to not answer, if there is nothing to contribute.\n"
             f"\nQuestion: {query}"
         )
-        response = self.llm.prompt(prompt)
+        response = await self.llm.aprompt(prompt)
         if verbose:
             print(f"Ask LLM: {perf_counter() - start}s")
         return response
 
-    def answer_question(self, query: str, candidates: List[str], use_ask_llm: bool = False, verbose: bool = False):
+    def answer_question(self, query: str, candidates: List[str], background_info: str = None):
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(self.answer_question(query, candidates, background_info))
+
+    async def aanswer_question(self, query: str, candidates: List[str], background_info: str = None):
         joined_candidates = "\n".join(candidates)
         prompt = "".join((
             "Write an answer for the question below based on the provided context. If the context provides insufficient information, reply \"I cannot answer\".\n"
@@ -101,17 +118,28 @@ class Docs:
             "For each part of your answer, indicate which sources most support it via valid citation markers at the end of sentences, like (Foo et al., 2020).\n"
             "Answer in an unbiased, comprehensive, and scholarly tone. If the question is subjective, provide an opinionated answer in the concluding 1-2 sentences.\n"
             f"\n{joined_candidates}\n\n",
-            (f"\nExtra background information: {self.ask_llm(query, verbose=verbose)}\n\n" if use_ask_llm else ""),
+            (f"\nExtra background information: {background_info}\n\n" if background_info else ""),
             f"\nQuestion: {query}",
         ))
-        return self.llm.prompt(prompt)
-    
+        return await self.llm.aprompt(prompt)
+
     def query(self, query: str, k: int = 5, fetch_k: int = 10, summarize: bool = True, use_ask_llm: bool = False, verbose: bool = False):
-        candidates = self.gather_evidence(query, k, fetch_k, summarize=summarize, verbose=verbose)
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(self.aquery(query, k, fetch_k, summarize, use_ask_llm, verbose))
+    
+    async def aquery(self, query: str, k: int = 5, fetch_k: int = 10, summarize: bool = True, use_ask_llm: bool = False, verbose: bool = False):
+        if use_ask_llm:
+            candidates, background_info = await asyncio.gather(
+                self.agather_evidence(query, k, fetch_k, summarize=summarize, verbose=verbose),
+                self.aask_llm(query, verbose),
+            )
+        else:
+            candidates = await self.agather_evidence(query, k, fetch_k, summarize=summarize, verbose=verbose)
+            background_info = None
         # if verbose:
         #     print(candidates)
         start = perf_counter()
-        response = self.answer_question(query, candidates, use_ask_llm=use_ask_llm, verbose=verbose)
+        response = await self.aanswer_question(query, candidates, background_info=background_info)
         if verbose:
             print(f"Answer question: {perf_counter() - start}s")
         return response
