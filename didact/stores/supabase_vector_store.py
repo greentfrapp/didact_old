@@ -11,8 +11,13 @@ from didact.bib import doi_to_apa
 from didact.llms.base import BaseLLM
 from didact.readers import parse_pdf
 from didact.types import Embeddable, EmbeddedText
-from didact.utils import adownload_arxiv_pdf
+from didact.utils import adownload_arxiv_pdf, adownload_via_arxiv
 from .vector_store import VectorStore
+
+
+class DocumentExistsError(Exception):
+    def __init__(self, message):
+        super().__init__(message)
 
 
 class SupabaseVectorStore(VectorStore):
@@ -51,18 +56,27 @@ class SupabaseVectorStore(VectorStore):
             f"doi.eq.{doi},arxiv_id.eq.{arxiv_id}"
         ).execute()
         if len(doi_check_response.data):
-            raise ValueError(f"{doi or arxiv_id} already exists in database")
+            raise DocumentExistsError(f"{doi or arxiv_id} already exists in database")
 
-        filename = await adownload_arxiv_pdf(arxiv_id, version)
+        filename = None
+        try:
+            filename = await adownload_arxiv_pdf(arxiv_id, version)
+        except ValueError:
+            filename = await adownload_via_arxiv(arxiv_id, version)
+        if not filename:
+            raise ValueError("Failed to download PDF")
+        
         contents = parse_pdf(filename)
         Path(filename).unlink()
-        chunks = []
+        chunks: list[str] = []
         max_chunk_size = 3000
         overlap = 100
         while len(contents) > max_chunk_size:
             chunks.append(contents[:max_chunk_size])
             contents = contents[max_chunk_size-overlap:]
         if len(contents): chunks.append(contents)
+        # Sanitize NULL characters
+        chunks = [c.replace("\x00", "") for c in chunks]
         
         # Insert document
         response = await supabase.table("documents").insert({
@@ -87,9 +101,22 @@ class SupabaseVectorStore(VectorStore):
             await supabase.table("chunks").insert([{
                 "value": chunk,
                 "vector": emb.tolist(),
-                "document": doc_id
+                "document": doc_id,
             } for emb, chunk in zip(embeddings, chunks)]).execute()
-        print(f"Embedded and inserted {title}")
+        # print(f"Embedded and inserted {title}")
+
+    async def delete_document(self, arxiv_json):
+        supabase = await self.get_async_client()
+        arxiv_id = arxiv_json.get("id")
+        doi = arxiv_json.get("doi")
+        # Check if doi already exists
+        doi_check_response = await supabase.table("documents").select("*").or_(
+            f"doi.eq.{doi},arxiv_id.eq.{arxiv_id}"
+        ).execute()
+        if not len(doi_check_response.data): return
+        doc_id = doi_check_response.data[0]["id"]
+        await supabase.table("chunks").delete().eq("document", doc_id).execute()
+        await supabase.table("documents").delete().eq("id", doc_id).execute()
 
     def add_texts_and_embeddings(
         self,

@@ -19,6 +19,12 @@ if __name__ == "__main__":
     start = perf_counter()
     # docs.add("../paper-qa/sample_papers/14_74.pdf")
     # response = docs.query("What is the architecture for a resnet model?", verbose=True)
-    response = docs.query("What is the resnet model meant to solve?", summarize=True, use_ask_llm=True, verbose=True)
+    response = docs.query(
+        "What are the downsides of RAG and the mitigations?",
+        # "What is the resnet model meant to solve?",
+        k=10,
+        fetch_k=20,
+        summarize=True, use_ask_llm=True, verbose=True,
+    )
     print(response)
     print(f"Duration: {perf_counter() - start}s")

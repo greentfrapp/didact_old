@@ -12,6 +12,7 @@ from didact.config import settings
 from didact.llms.base import BaseLLM
 from didact.llms.gemini import GeminiLLM
 from didact.readers import parse_pdf
+from didact.stores.supabase_vector_store import DocumentExistsError
 from didact.stores import SupabaseVectorStore
 from didact.types import Embeddable, EmbeddedText
 from utils import download_latest_arxiv_pdf
@@ -50,7 +51,7 @@ def insert_arxiv_doc(arxiv_json):
     }).execute()
 
     if not len(response.data):
-        raise ValueError
+        raise ValueError("Error inserting document")
 
     doc_id = response.data[0].get("id")
 
@@ -74,13 +75,43 @@ def insert_arxiv_doc(arxiv_json):
         # store.add_texts_and_embeddings([EmbeddedText(embedding=embedding, text=chunk)])
 
 
+def record_failed_document(arxiv_json, filename="arxiv-failed.json"):
+    with open(filename, "a") as file:
+        file.write(json.dumps(arxiv_json) + "\n")
+
+
+def get_failed_entries(filename="arxiv-failed.json"):
+    if not Path(filename).exists():
+        return []
+    failed_entries = []
+    with open(filename, "r") as file:
+        for line in file:
+            try:
+                entry_data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            failed_entries.append(entry_data)
+    return failed_entries
+
+
+def remove_failed_entry(arxiv_json, filename="arxiv-failed.json"):
+    if not Path(filename).exists():
+        return
+    failed_entries = get_failed_entries(filename)
+    failed_entries = [d for d in failed_entries if d["id"] != arxiv_json["id"]]
+    with open(filename, "w") as file:
+        for entry in failed_entries:
+            file.write(json.dumps(entry) + "\n")
+
+
 async def main():
     """
     Not inserted:
     - 0704.0213
     - 0704.0374
     """
-    data_path = "../data/arxiv-metadata-oai-cs-10k.json"
+    # data_path = "../data/arxiv-metadata-oai-cs-10k.json"
+    data_path = "../data/arxiv-metadata-oai-recent-3000.json"
     # data_path = "../data/arxiv-metadata-oai-resnet.json"
     data = []
     with open(data_path, "r") as file:
@@ -90,7 +121,11 @@ async def main():
             except json.JSONDecodeError:
                 continue
             data.append(entry_data)
-    data = data[179:]
+
+    failed_entries = get_failed_entries()
+    failed_entry_ids = [d["id"] for d in failed_entries]
+
+    # data = data[287:]
     # for i, row in tqdm(enumerate(data)):
     #     doi = row.get("doi")
     #     arxiv_id = row.get("id")
@@ -102,24 +137,39 @@ async def main():
     #         print(row)
     #         break
     # quit()
+    # await store.delete_document(data[0])
+    # quit()
     start = perf_counter()
-    # insert_arxiv_doc(data[0])
+    pbar = tqdm(total=len(data))
     num_ingested = 0
     i = 0
     batchsize = 20
     while True:
         rows = data[i:i+batchsize]
         tasks = [store.aadd_arxiv_json(row, llm) for row in rows]
-        for coroutine in asyncio.as_completed(tasks):
+        for j, coroutine in enumerate(asyncio.as_completed(tasks)):
             try:
                 await coroutine
                 num_ingested += 1
+                if rows[j]["id"] in failed_entry_ids:
+                    remove_failed_entry(rows[j])
+            except DocumentExistsError:
+                pass
             except Exception as e:
+                try:
+                    await store.delete_document(rows[j])
+                except Exception as d:
+                    print('Exception: ', d)
+                if rows[j]["id"] not in failed_entry_ids:
+                    record_failed_document(rows[j])
                 print('Exception: ', e)
+            pbar.update(1)
         i += batchsize
-        if num_ingested >= 100:
+        if i >= len(data): break
+        # break
+        if num_ingested >= 949:
             break
-    print((perf_counter() - start) / num_ingested)
+    print(f"Average time per document: {(perf_counter() - start) / num_ingested}s")
 
 
 if __name__ == "__main__":

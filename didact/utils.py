@@ -1,6 +1,7 @@
 from typing import Optional
 import asyncio
-import subprocess
+
+import aiohttp
 
 
 def get_loop() -> asyncio.AbstractEventLoop:
@@ -14,7 +15,7 @@ def get_loop() -> asyncio.AbstractEventLoop:
 
 def download_arxiv_pdf(id: str, version: str = "", filename: Optional[str] = None):
     loop = get_loop()
-    loop.run_until_complete(adownload_via_gsutil(id, version, filename))
+    loop.run_until_complete(adownload_arxiv_pdf(id, version, filename))
 
 
 async def adownload_arxiv_pdf(id: str, version: str = "", filename: Optional[str] = None):
@@ -45,3 +46,14 @@ async def adownload_via_gsutil(bucket_name, source_blob_name, destination_file_n
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await process.communicate()
+    if stderr: raise ValueError(stderr)
+
+
+async def adownload_via_arxiv(id: str, version: str, filename = None):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"https://arxiv.org/pdf/{id}") as response:
+            pdf_data = await response.content.read()
+    dst = filename or f"{id}{version}.pdf"
+    with open(dst, 'wb') as handler:
+        handler.write(pdf_data)
+    return dst
