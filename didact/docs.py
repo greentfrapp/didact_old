@@ -89,6 +89,8 @@ class Docs:
             summary_score_list = [{"summary": c.text, "source": c.source, "score": 5} for c in candidates]
         if verbose and summarize:
             print(f"Summarize chunks: {perf_counter() - start}s")
+            for s in summary_score_list:
+                print(s["source"])
         return [s["summary"] + "\n(" + s["source"] + ")" for s in summary_score_list if s.get("summary") and s.get("score")]
 
     def ask_llm(self, query: str, verbose: bool = False):

@@ -23,11 +23,11 @@ class DocumentExistsError(Exception):
 class SupabaseVectorStore(VectorStore):
     texts: list[Embeddable] = []
     _embeddings: np.ndarray | None = None
-    
+
     def __init__(self, supabase_url: str, supabase_service_key: str):
         self.supabase_url = supabase_url
         self.supabase_service_key = supabase_service_key
-    
+
     async def get_async_client(self) -> AsyncClient:
         return await create_async_client(self.supabase_url, self.supabase_service_key)
 
@@ -52,9 +52,12 @@ class SupabaseVectorStore(VectorStore):
         version = versions[-1]
 
         # Check if doi already exists
-        doi_check_response = await supabase.table("documents").select("*").or_(
-            f"doi.eq.{doi},arxiv_id.eq.{arxiv_id}"
-        ).execute()
+        doi_check_response = (
+            await supabase.table("documents")
+            .select("*")
+            .or_(f"doi.eq.{doi},arxiv_id.eq.{arxiv_id}")
+            .execute()
+        )
         if len(doi_check_response.data):
             raise DocumentExistsError(f"{doi or arxiv_id} already exists in database")
 
@@ -73,36 +76,52 @@ class SupabaseVectorStore(VectorStore):
         overlap = 100
         while len(contents) > max_chunk_size:
             chunks.append(contents[:max_chunk_size])
-            contents = contents[max_chunk_size-overlap:]
-        if len(contents): chunks.append(contents)
+            contents = contents[max_chunk_size - overlap :]
+        if len(contents):
+            chunks.append(contents)
         # Sanitize NULL characters
         chunks = [c.replace("\x00", "") for c in chunks]
-        
+
+        # Embed abstract
+        abstract_embeddings = await llm.aembed(abstract)
+
         # Insert document
-        response = await supabase.table("documents").insert({
-            "url": url,
-            "title": title,
-            "abstract": abstract,
-            "authors": authors,
-            "doi": doi,
-            "arxiv_id": arxiv_id,
-        }).execute()
+        response = (
+            await supabase.table("documents")
+            .insert(
+                {
+                    "url": url,
+                    "title": title,
+                    "abstract": abstract,
+                    "authors": authors,
+                    "doi": doi,
+                    "arxiv_id": arxiv_id,
+                    "vector": abstract_embeddings.tolist(),
+                }
+            )
+            .execute()
+        )
         if not len(response.data):
             raise ValueError("Document not inserted")
         doc_id = response.data[0].get("id")
-        
+
         # Insert chunks in batches
         chunk_groups = list(zip_longest(*(iter(chunks),) * batchsize))
         for chunk_group in chunk_groups:
             chunk_group = [c for c in chunk_group if c]
-            embeddings = await asyncio.gather(*[
-                llm.aembed(chunk) for chunk in chunk_group
-            ])
-            await supabase.table("chunks").insert([{
-                "value": chunk,
-                "vector": emb.tolist(),
-                "document": doc_id,
-            } for emb, chunk in zip(embeddings, chunks)]).execute()
+            embeddings = await asyncio.gather(
+                *[llm.aembed(chunk) for chunk in chunk_group]
+            )
+            await supabase.table("chunks").insert(
+                [
+                    {
+                        "value": chunk,
+                        "vector": emb.tolist(),
+                        "document": doc_id,
+                    }
+                    for emb, chunk in zip(embeddings, chunks)
+                ]
+            ).execute()
         # print(f"Embedded and inserted {title}")
 
     async def delete_document(self, arxiv_json):
@@ -110,10 +129,14 @@ class SupabaseVectorStore(VectorStore):
         arxiv_id = arxiv_json.get("id")
         doi = arxiv_json.get("doi")
         # Check if doi already exists
-        doi_check_response = await supabase.table("documents").select("*").or_(
-            f"doi.eq.{doi},arxiv_id.eq.{arxiv_id}"
-        ).execute()
-        if not len(doi_check_response.data): return
+        doi_check_response = (
+            await supabase.table("documents")
+            .select("*")
+            .or_(f"doi.eq.{doi},arxiv_id.eq.{arxiv_id}")
+            .execute()
+        )
+        if not len(doi_check_response.data):
+            return
         doc_id = doi_check_response.data[0]["id"]
         await supabase.table("chunks").delete().eq("document", doc_id).execute()
         await supabase.table("documents").delete().eq("id", doc_id).execute()
@@ -122,12 +145,19 @@ class SupabaseVectorStore(VectorStore):
         self,
         texts: Sequence[Embeddable],
     ) -> None:
-        self.supabase.table("chunks").insert([{
-            "value": text.text,
-            "vector": text.embedding,
-        } for text in texts]).execute()
+        self.supabase.table("chunks").insert(
+            [
+                {
+                    "value": text.text,
+                    "vector": text.embedding,
+                }
+                for text in texts
+            ]
+        ).execute()
 
-    def similarity_search(self, client: BaseLLM, query: str, k: int) -> tuple[Sequence[Embeddable], list[float]]:
+    def similarity_search(
+        self, client: BaseLLM, query: str, k: int
+    ) -> tuple[Sequence[Embeddable], list[float]]:
         loop = asyncio.get_event_loop()
         return loop.run_until_complete(self.asimilarity_search(client, query, k))
 
@@ -140,29 +170,81 @@ class SupabaseVectorStore(VectorStore):
 
         supabase = await self.get_async_client()
 
-        np_query = await client.aembed(query)
+        np_query = (await client.aembed(query)).tolist()
 
-        response = await supabase.rpc('match_documents', {
-            "query_embedding": np_query.tolist(),
-            "match_threshold": 0,
-            "match_count": k,
-        }).execute()
+        two_stage = True
+        if two_stage:
+            # First match by documents
+            response = await supabase.rpc(
+                "match_documents",
+                {
+                    "query_embedding": np_query,
+                    "match_threshold": 0,
+                    "match_count": k,
+                },
+            ).execute()
+            matched_documents = response.data
+            # TODO - Use LLM to filter by relevance
+            # TODO - Use MMR search to further filter documents
 
-        results = []
-        for r in response.data: 
-            doi = r.get("document")
-            year = "20" + r.get("arxiv_id").split(".")[0][:2]
-            if doi:
-                citation = doi_to_apa(doi)
-            else:
-                citation = r.get("authors") + f" ({year}) " + r.get("title")
-            results.append(
-                EmbeddedText(
-                    embedding=json.loads(r.get("vector", "None")),
-                    text=r.get("value"),
-                    source=citation,
+            # Then match by chunks, filtered by relevant documents
+            response = await supabase.rpc(
+                "match_chunks",
+                {
+                    "query_embedding": np_query,
+                    "match_threshold": 0,
+                    "match_count": k,
+                    "doc_ids": [d["id"] for d in matched_documents],
+                },
+            ).execute()
+
+            results = []
+            for r in response.data:
+                doc_id = r.get("doc_id")
+                document = next((d for d in matched_documents if d["id"] == doc_id))
+                doi = document.get("doi")
+                year = "20" + document.get("arxiv_id").split(".")[0][:2]
+                if doi:
+                    citation = doi_to_apa(doi)
+                else:
+                    citation = (
+                        document.get("authors") + f" ({year}) " + document.get("title")
+                    )
+                results.append(
+                    EmbeddedText(
+                        embedding=json.loads(r.get("vector", "None")),
+                        text=r.get("value"),
+                        source=citation,
+                    )
                 )
-            )
+        else:
+            response = await supabase.rpc(
+                "match_all_chunks",
+                {
+                    "query_embedding": np_query,
+                    "match_threshold": 0,
+                    "match_count": k,
+                },
+            ).execute()
+
+            results = []
+            for r in response.data:
+                doc_id = r.get("doc_id")
+                doi = r.get("doc_doi")
+                year = "20" + r.get("doc_arxiv_id").split(".")[0][:2]
+                if doi:
+                    citation = doi_to_apa(doi)
+                else:
+                    citation = (
+                        r.get("doc_authors") + f" ({year}) " + r.get("doc_title")
+                    )
+                results.append(
+                    EmbeddedText(
+                        embedding=json.loads(r.get("vector", "None")),
+                        text=r.get("value"),
+                        source=citation,
+                    )
+                )
         scores = [r.get("similarity") for r in response.data]
 
         return (results, scores)

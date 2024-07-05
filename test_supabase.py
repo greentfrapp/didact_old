@@ -20,10 +20,12 @@ if __name__ == "__main__":
     # docs.add("../paper-qa/sample_papers/14_74.pdf")
     # response = docs.query("What is the architecture for a resnet model?", verbose=True)
     response = docs.query(
-        "What are the downsides of RAG and the mitigations?",
+        "What approaches convert k-space of low field MRI to high resolution images",
+        # "What is inverse crime in the context of image upscaling?",
+        # "What are the downsides of RAG and the mitigations?",
         # "What is the resnet model meant to solve?",
-        k=10,
-        fetch_k=20,
+        k=5,
+        fetch_k=10,
         summarize=True, use_ask_llm=True, verbose=True,
     )
     print(response)

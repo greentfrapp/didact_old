@@ -104,12 +104,14 @@ def remove_failed_entry(arxiv_json, filename="arxiv-failed.json"):
             file.write(json.dumps(entry) + "\n")
 
 
+def get_ingested_docs():
+    response = supabase.table("documents").select("arxiv_id").execute()
+    return [r.get("arxiv_id") for r in response.data]
+
+
 async def main():
-    """
-    Not inserted:
-    - 0704.0213
-    - 0704.0374
-    """
+    ingested_doc_arxiv_ids = get_ingested_docs()
+
     # data_path = "../data/arxiv-metadata-oai-cs-10k.json"
     data_path = "../data/arxiv-metadata-oai-recent-3000.json"
     # data_path = "../data/arxiv-metadata-oai-resnet.json"
@@ -124,6 +126,10 @@ async def main():
 
     failed_entries = get_failed_entries()
     failed_entry_ids = [d["id"] for d in failed_entries]
+
+    # Remove ingested docs
+    data = [d for d in data if d["id"] not in ingested_doc_arxiv_ids]
+    data = [d for d in data if d["id"] not in failed_entry_ids]
 
     # data = data[287:]
     # for i, row in tqdm(enumerate(data)):
@@ -143,7 +149,8 @@ async def main():
     pbar = tqdm(total=len(data))
     num_ingested = 0
     i = 0
-    batchsize = 20
+    batchsize = 10
+    exit_loop = False
     while True:
         rows = data[i:i+batchsize]
         tasks = [store.aadd_arxiv_json(row, llm) for row in rows]
@@ -162,12 +169,15 @@ async def main():
                     print('Exception: ', d)
                 if rows[j]["id"] not in failed_entry_ids:
                     record_failed_document(rows[j])
-                print('Exception: ', e)
+                doc_id = rows[j].get("id")
+                print(f'Exception when ingesting doc {doc_id}: ', e)
+                # exit_loop = True
             pbar.update(1)
         i += batchsize
+        if exit_loop: break
         if i >= len(data): break
         # break
-        if num_ingested >= 949:
+        if num_ingested >= 1000:
             break
     print(f"Average time per document: {(perf_counter() - start) / num_ingested}s")
 
