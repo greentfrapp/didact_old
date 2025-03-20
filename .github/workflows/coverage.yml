@@ -13,4 +13,4 @@ jobs:
         id: generate-coverage-report
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        uses: greentfrapp/pytest-annotate-pr
+        uses: greentfrapp/pytest-annotate-pr@main
