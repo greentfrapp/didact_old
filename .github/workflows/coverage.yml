@@ -9,8 +9,12 @@ jobs:
         uses: actions/checkout@v2
         with:
           fetch-depth: 0
+      - name: Git diff
+        run: git diff --name-only --diff-filter=AM ed54869dbc746c23adb9a1f1f7ee405f48d28e02 ${{ github.event.pull_request.head.sha }}
       - name: Generate coverage report
         id: generate-coverage-report
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         uses: greentfrapp/pytest-annotate-pr@main
