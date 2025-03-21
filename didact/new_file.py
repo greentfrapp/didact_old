@@ -3,5 +3,5 @@ def foo(bar: str):
 
 
 def hello(bar: str):
-    # Dummy doc
+    # Dummy docs
     return bar
